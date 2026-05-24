@@ -403,6 +403,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 <header class="header">
   <h1>📅 日程规划助手</h1>
   <div class="header-actions">
+    <button class="icon-btn" onclick="openQuickAdd()" title="快速添加任务" style="font-size:22px;font-weight:700;color:var(--primary);">+</button>
     <button class="icon-btn" onclick="openSettings()" title="设置">⚙️</button>
   </div>
 </header>
@@ -536,6 +537,29 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 
 </main>
 
+<!-- Quick Add Task Modal -->
+<div class="modal-overlay" id="quick-add-modal" onclick="if(event.target===this)closeQuickAdd()">
+  <div class="modal">
+    <h2>➕ 快速添加任务</h2>
+    <div class="form-row">
+      <label>任务名称</label>
+      <input type="text" id="quick-add-title" placeholder="例如：复习高数第三章" />
+    </div>
+    <div class="form-row">
+      <label>日期</label>
+      <input type="date" id="quick-add-date" />
+    </div>
+    <div class="form-row">
+      <label>预估时长（分钟）</label>
+      <input type="number" id="quick-add-duration" value="60" min="5" max="480" />
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeQuickAdd()">取消</button>
+      <button class="btn btn-primary" onclick="submitQuickAdd()">添加任务</button>
+    </div>
+  </div>
+</div>
+
 <!-- Settings Modal -->
 <div class="modal-overlay" id="settings-modal" onclick="if(event.target===this)closeSettings()">
   <div class="modal">
@@ -648,6 +672,43 @@ function openSettings() {
 
 function closeSettings() {
   document.getElementById('settings-modal').classList.remove('active');
+}
+
+// ===========================
+// QUICK ADD TASK
+// ===========================
+function openQuickAdd() {
+  document.getElementById('quick-add-date').value = formatDate(new Date());
+  document.getElementById('quick-add-duration').value = appData.settings.defaultPomodoroMinutes || 25;
+  document.getElementById('quick-add-title').value = '';
+  document.getElementById('quick-add-modal').classList.add('active');
+  setTimeout(() => document.getElementById('quick-add-title').focus(), 100);
+}
+
+function closeQuickAdd() {
+  document.getElementById('quick-add-modal').classList.remove('active');
+}
+
+function submitQuickAdd() {
+  const title = document.getElementById('quick-add-title').value.trim();
+  const date = document.getElementById('quick-add-date').value;
+  const duration = parseInt(document.getElementById('quick-add-duration').value) || 60;
+  if (!title) { showToast('请输入任务名称', 'error'); return; }
+  if (!date) { showToast('请选择日期', 'error'); return; }
+
+  appData.tasks.push({
+    id: genId(),
+    goalId: null,
+    title: title,
+    date: date,
+    completed: false,
+    estimatedMinutes: Math.min(480, Math.max(5, duration))
+  });
+  saveData(appData);
+  closeQuickAdd();
+  showToast('任务已添加');
+  renderCalendar();
+  refreshPomodoroTaskSelect();
 }
 
 function saveSettings() {
