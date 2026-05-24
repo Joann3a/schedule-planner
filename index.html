@@ -438,9 +438,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     </div>
 
     <div class="card" id="ai-result-card" style="display:none;">
-      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
-        <span>📋 拆解结果</span>
-        <button class="btn btn-success btn-sm" onclick="saveAllTasks()">💾 保存全部任务</button>
+      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <span>📋 拆解结果 <span style="font-weight:400;font-size:13px;color:var(--gray-500);">（勾选=保存，取消勾选=跳过）</span></span>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-outline btn-sm" onclick="addAiTaskRow()">➕ 添加任务</button>
+          <button class="btn btn-success btn-sm" onclick="saveAllTasks()">💾 保存已选任务</button>
+        </div>
       </div>
       <ul class="task-list" id="ai-task-list"></ul>
     </div>
@@ -759,29 +762,18 @@ async function analyzeGoal() {
         title: t.title,
         date: formatDate(taskDate),
         completed: false,
-        estimatedMinutes: t.estimatedMinutes || 60
+        estimatedMinutes: t.estimatedMinutes || 60,
+        accepted: true,
+        suggestion: ''
       };
     });
 
     // Store temporarily for display
     window._aiGeneratedTasks = aiTasks;
 
-    // Render
-    const list = document.getElementById('ai-task-list');
-    list.innerHTML = aiTasks.map((t, i) => `
-      <li class="task-item">
-        <div class="task-info">
-          <div class="task-title">${i + 1}. ${escHtml(t.title)}</div>
-          <div class="task-meta">📅 ${t.date} · ⏱ ${t.estimatedMinutes}分钟</div>
-        </div>
-        <div class="task-actions">
-          <button class="btn btn-outline btn-sm" onclick="deleteAiTask('${t.id}')">✕</button>
-        </div>
-      </li>
-    `).join('');
-
+    renderAiTasks();
     document.getElementById('ai-result-card').style.display = '';
-    showToast(`AI 已拆解 ${aiTasks.length} 个任务`);
+    showToast(`AI 已拆解 ${aiTasks.length} 个任务，可编辑或取消勾选不需要的`);
 
   } catch (err) {
     showToast(err.message, 'error');
@@ -791,26 +783,75 @@ async function analyzeGoal() {
   }
 }
 
+function renderAiTasks() {
+  const tasks = window._aiGeneratedTasks || [];
+  const list = document.getElementById('ai-task-list');
+  if (tasks.length === 0) {
+    document.getElementById('ai-result-card').style.display = 'none';
+    return;
+  }
+  document.getElementById('ai-result-card').style.display = '';
+  list.innerHTML = tasks.map((t, i) => `
+    <li class="task-item${t.accepted === false ? ' completed' : ''}" style="flex-wrap:wrap;align-items:flex-start;">
+      <label style="display:flex;align-items:center;cursor:pointer;flex-shrink:0;">
+        <input type="checkbox" ${t.accepted !== false ? 'checked' : ''}
+          onchange="toggleAiTaskAccept('${t.id}', this.checked)" style="width:18px;height:18px;cursor:pointer;" />
+      </label>
+      <div class="task-info" style="flex:1;min-width:150px;">
+        <input type="text" value="${escHtml(t.title)}"
+          onchange="updateAiTaskField('${t.id}', 'title', this.value)"
+          style="width:100%;border:1px solid var(--gray-200);border-radius:4px;padding:4px 8px;font-size:13px;"
+          placeholder="任务名称" />
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+        <input type="date" value="${t.date}"
+          onchange="updateAiTaskField('${t.id}', 'date', this.value)"
+          style="width:130px;font-size:12px;padding:4px 6px;border:1px solid var(--gray-200);border-radius:4px;" />
+        <input type="number" value="${t.estimatedMinutes || 60}" min="5" max="480"
+          onchange="updateAiTaskField('${t.id}', 'estimatedMinutes', parseInt(this.value)||60)"
+          style="width:60px;font-size:12px;padding:4px 6px;border:1px solid var(--gray-200);border-radius:4px;" title="分钟" />
+        <span style="font-size:11px;color:var(--gray-400);">min</span>
+      </div>
+      <div style="width:100%;margin-top:4px;display:flex;gap:6px;align-items:center;">
+        <input type="text" value="${escHtml(t.suggestion || '')}"
+          onchange="updateAiTaskField('${t.id}', 'suggestion', this.value)"
+          placeholder="💡 添加修改建议…"
+          style="flex:1;font-size:12px;padding:3px 8px;border:1px dashed var(--gray-300);border-radius:4px;color:var(--gray-600);" />
+        <button class="btn btn-outline btn-sm" onclick="deleteAiTask('${t.id}')" title="删除">✕</button>
+      </div>
+    </li>
+  `).join('');
+}
+
+function toggleAiTaskAccept(id, accepted) {
+  const task = (window._aiGeneratedTasks || []).find(t => t.id === id);
+  if (task) task.accepted = accepted;
+}
+
+function updateAiTaskField(id, field, value) {
+  const task = (window._aiGeneratedTasks || []).find(t => t.id === id);
+  if (task) task[field] = value;
+}
+
 function deleteAiTask(id) {
   if (!window._aiGeneratedTasks) return;
   window._aiGeneratedTasks = window._aiGeneratedTasks.filter(t => t.id !== id);
-  if (window._aiGeneratedTasks.length === 0) {
-    document.getElementById('ai-result-card').style.display = 'none';
-  } else {
-    // Re-render
-    const list = document.getElementById('ai-task-list');
-    list.innerHTML = window._aiGeneratedTasks.map((t, i) => `
-      <li class="task-item">
-        <div class="task-info">
-          <div class="task-title">${i + 1}. ${escHtml(t.title)}</div>
-          <div class="task-meta">📅 ${t.date} · ⏱ ${t.estimatedMinutes}分钟</div>
-        </div>
-        <div class="task-actions">
-          <button class="btn btn-outline btn-sm" onclick="deleteAiTask('${t.id}')">✕</button>
-        </div>
-      </li>
-    `).join('');
-  }
+  renderAiTasks();
+}
+
+function addAiTaskRow() {
+  if (!window._aiGeneratedTasks) window._aiGeneratedTasks = [];
+  window._aiGeneratedTasks.push({
+    id: genId(),
+    goalId: null,
+    title: '新任务',
+    date: formatDate(new Date()),
+    completed: false,
+    estimatedMinutes: 60,
+    accepted: true,
+    suggestion: ''
+  });
+  renderAiTasks();
 }
 
 function saveAllTasks() {
@@ -818,16 +859,30 @@ function saveAllTasks() {
     showToast('没有可保存的任务', 'error');
     return;
   }
+  const accepted = window._aiGeneratedTasks.filter(t => t.accepted !== false);
+  if (accepted.length === 0) {
+    showToast('请至少勾选一个任务', 'error');
+    return;
+  }
   const goalId = genId();
   const goalTitle = document.getElementById('goal-input').value.trim();
   appData.goals.push({ id: goalId, title: goalTitle, createdAt: new Date().toISOString() });
-  window._aiGeneratedTasks.forEach(t => { t.goalId = goalId; });
-  appData.tasks.push(...window._aiGeneratedTasks);
+  accepted.forEach(t => {
+    t.goalId = goalId;
+    // Remove UI-only fields before saving
+    delete t.accepted;
+    delete t.suggestion;
+  });
+  const totalCount = window._aiGeneratedTasks.length;
+  appData.tasks.push(...accepted);
   saveData(appData);
   window._aiGeneratedTasks = [];
   document.getElementById('ai-result-card').style.display = 'none';
   document.getElementById('goal-input').value = '';
-  showToast('任务已保存！可在日历和番茄钟中查看');
+  const msg = totalCount > accepted.length
+    ? `已保存 ${accepted.length} 个任务（跳过 ${totalCount - accepted.length} 个未勾选）`
+    : `已保存 ${accepted.length} 个任务！可在日历和番茄钟中查看`;
+  showToast(msg);
 }
 
 function escHtml(s) {
