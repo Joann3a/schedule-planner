@@ -437,15 +437,26 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
       </div>
     </div>
 
+    <!-- Conversation area -->
+    <div class="card" id="ai-conversation-card" style="display:none;">
+      <div class="card-header">💬 对话记录</div>
+      <div id="ai-conversation" style="max-height:300px;overflow-y:auto;"></div>
+    </div>
+
     <div class="card" id="ai-result-card" style="display:none;">
       <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-        <span>📋 拆解结果 <span style="font-weight:400;font-size:13px;color:var(--gray-500);">（勾选=保存，取消勾选=跳过）</span></span>
+        <span>📋 拆解结果 <span style="font-weight:400;font-size:13px;color:var(--gray-500);">（勾选=保存，取消=跳过）</span></span>
         <div style="display:flex;gap:6px;">
           <button class="btn btn-outline btn-sm" onclick="addAiTaskRow()">➕ 添加任务</button>
           <button class="btn btn-success btn-sm" onclick="saveAllTasks()">💾 保存已选任务</button>
         </div>
       </div>
       <ul class="task-list" id="ai-task-list"></ul>
+      <div style="margin-top:12px;display:flex;gap:8px;align-items:flex-start;">
+        <input type="text" id="ai-feedback-input" placeholder="💬 输入整体修改建议让 AI 重新调整，如：任务太密集，多拆几个…"
+          style="flex:1;font-size:13px;" />
+        <button class="btn btn-primary btn-sm" id="btn-revise" onclick="sendFeedback()" style="flex-shrink:0;">🔄 提交建议给 AI 修改</button>
+      </div>
     </div>
   </section>
 
@@ -680,21 +691,83 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 // ===========================
 // AI PLANNER
 // ===========================
+window._aiConversation = [];
+
+function getAPISettings() {
+  const endpoint = document.getElementById('api-endpoint-inline').value.trim() || appData.settings.apiEndpoint;
+  const apiKey = document.getElementById('api-key-inline').value.trim() || appData.settings.apiKey;
+  const model = document.getElementById('api-model-inline').value.trim() || appData.settings.apiModel || 'gpt-4o';
+  return { endpoint, apiKey, model };
+}
+
+async function callAI(messages) {
+  const { endpoint, apiKey, model } = getAPISettings();
+  if (!endpoint || !apiKey) throw new Error('请先配置 API Endpoint 和 API Key');
+
+  const url = endpoint.replace(/\/+$/, '') + '/chat/completions';
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, messages, temperature: 0.7, max_tokens: 2000 })
+  });
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`API 请求失败 (${resp.status}): ${err}`);
+  }
+  const data = await resp.json();
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) throw new Error('AI 返回内容为空');
+  return content;
+}
+
+function parseTasksFromResponse(content) {
+  let jsonStr = content.trim();
+  const codeMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeMatch) jsonStr = codeMatch[1].trim();
+  try {
+    const parsed = JSON.parse(jsonStr);
+    if (parsed.tasks && Array.isArray(parsed.tasks)) return parsed.tasks;
+  } catch(e) {}
+  return null;
+}
+
+function tasksToObjects(rawTasks) {
+  const today = new Date();
+  return rawTasks.map(t => {
+    const taskDate = new Date(today);
+    taskDate.setDate(taskDate.getDate() + (t.dayOffset || 0));
+    return {
+      id: genId(), goalId: null,
+      title: t.title, date: formatDate(taskDate),
+      completed: false, estimatedMinutes: t.estimatedMinutes || 60,
+      accepted: true, suggestion: ''
+    };
+  });
+}
+
+function renderAiConversation() {
+  const container = document.getElementById('ai-conversation');
+  const card = document.getElementById('ai-conversation-card');
+  const msgs = window._aiConversation || [];
+  if (msgs.length === 0) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  container.innerHTML = msgs.map(m => {
+    const isUser = m.role === 'user';
+    return `<div style="margin-bottom:10px;padding:8px 12px;border-radius:8px;font-size:13px;
+      ${isUser ? 'background:var(--primary-bg);margin-left:24px;' : 'background:var(--gray-50);margin-right:24px;'}">
+      <div style="font-weight:600;font-size:11px;color:var(--gray-400);margin-bottom:2px;">${isUser ? '👤 你' : '🤖 AI助手'}</div>
+      <div style="white-space:pre-wrap;line-height:1.5;">${escHtml(m.content)}</div>
+    </div>`;
+  }).join('');
+  container.scrollTop = container.scrollHeight;
+}
+
 async function analyzeGoal() {
   const goalInput = document.getElementById('goal-input').value.trim();
   if (!goalInput) { showToast('请输入目标', 'error'); return; }
 
-  // Read settings from inline fields or fallback to stored
-  const endpoint = document.getElementById('api-endpoint-inline').value.trim() || appData.settings.apiEndpoint;
-  const apiKey = document.getElementById('api-key-inline').value.trim() || appData.settings.apiKey;
-  const model = document.getElementById('api-model-inline').value.trim() || appData.settings.apiModel || 'gpt-4o';
-
-  if (!endpoint || !apiKey) {
-    showToast('请先配置 API Endpoint 和 API Key', 'error');
-    return;
-  }
-
-  // Save inline settings
+  const { endpoint, apiKey, model } = getAPISettings();
+  if (!endpoint || !apiKey) { showToast('请先配置 API Endpoint 和 API Key', 'error'); return; }
   appData.settings.apiEndpoint = endpoint;
   appData.settings.apiKey = apiKey;
   appData.settings.apiModel = model;
@@ -705,81 +778,103 @@ async function analyzeGoal() {
   btn.innerHTML = '<span class="spinner"></span> AI 分析中…';
 
   try {
-    const prompt = `你是一个目标规划助手。用户的目标是："${goalInput}"。请你将这个目标拆解成具体的、可执行的任务清单。
+    window._aiConversation = [];
+    const systemPrompt = `你是一个智能目标规划助手。你的任务是帮助用户将目标拆解成可执行的任务清单。
 
-请严格按照以下JSON格式返回（只返回JSON，不要其他内容）：
+工作流程：
+1. 首先分析用户的目标是否足够具体。如果有疑问（如：时间范围不明确、目标太模糊、需要了解用户背景），先提出1-3个关键问题。
+2. 如果目标足够清晰，直接生成任务清单。
+
+当你准备好生成任务时，请严格用以下JSON格式（只返回JSON，放在代码块中）：
+\`\`\`json
 {
   "tasks": [
-    {"title": "任务名称", "dayOffset": 0, "estimatedMinutes": 60},
-    {"title": "任务名称", "dayOffset": 2, "estimatedMinutes": 90}
+    {"title": "具体可执行的任务名称", "dayOffset": 0, "estimatedMinutes": 60}
   ]
 }
+\`\`\`
 
-要求：
-- dayOffset 是从今天起的天数偏移（0=今天，1=明天，以此类推）
-- estimatedMinutes 是预估完成所需分钟数（15-480之间）
-- 任务数量控制在3-10个，按照合理的顺序分布
-- 任务标题要具体、可执行
-- 用中文返回任务标题`;
+规则：
+- dayOffset: 从今天起的天数（0=今天）
+- estimatedMinutes: 15-480之间的整数
+- 任务3-10个，按合理顺序分布
+- 标题具体可执行，中文`;
 
-    const url = endpoint.replace(/\/+$/, '') + '/chat/completions';
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: model,
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.7,
-        max_tokens: 2000
-      })
-    });
+    const content = await callAI([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `我的目标是：${goalInput}` }
+    ]);
 
-    if (!resp.ok) {
-      const err = await resp.text();
-      throw new Error(`API 请求失败 (${resp.status}): ${err}`);
+    window._aiConversation.push({ role: 'user', content: goalInput });
+    window._aiConversation.push({ role: 'assistant', content: content });
+    renderAiConversation();
+
+    const tasks = parseTasksFromResponse(content);
+    if (tasks) {
+      window._aiGeneratedTasks = tasksToObjects(tasks);
+      renderAiTasks();
+      document.getElementById('ai-result-card').style.display = '';
+      showToast(`AI 已拆解 ${tasks.length} 个任务`);
+    } else {
+      window._aiGeneratedTasks = null;
+      document.getElementById('ai-result-card').style.display = 'none';
+      showToast('AI 想了解更多信息，请在对话中回复');
     }
-
-    const data = await resp.json();
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) throw new Error('AI 返回内容为空');
-
-    // Parse JSON from response (try to extract from markdown code blocks)
-    let jsonStr = content.trim();
-    const codeMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (codeMatch) jsonStr = codeMatch[1].trim();
-
-    const parsed = JSON.parse(jsonStr);
-    if (!parsed.tasks || !Array.isArray(parsed.tasks)) throw new Error('AI 返回格式不正确');
-
-    // Create task objects
-    const today = new Date();
-    const aiTasks = parsed.tasks.map(t => {
-      const taskDate = new Date(today);
-      taskDate.setDate(taskDate.getDate() + (t.dayOffset || 0));
-      return {
-        id: genId(),
-        goalId: null,
-        title: t.title,
-        date: formatDate(taskDate),
-        completed: false,
-        estimatedMinutes: t.estimatedMinutes || 60,
-        accepted: true,
-        suggestion: ''
-      };
-    });
-
-    // Store temporarily for display
-    window._aiGeneratedTasks = aiTasks;
-
-    renderAiTasks();
-    document.getElementById('ai-result-card').style.display = '';
-    showToast(`AI 已拆解 ${aiTasks.length} 个任务，可编辑或取消勾选不需要的`);
-
   } catch (err) {
     showToast(err.message, 'error');
   } finally {
     btn.disabled = false;
     btn.innerHTML = '🤖 AI 智能拆解';
+  }
+}
+
+async function sendFeedback() {
+  const feedback = document.getElementById('ai-feedback-input').value.trim();
+  if (!feedback) { showToast('请输入修改建议', 'error'); return; }
+
+  const { endpoint, apiKey, model } = getAPISettings();
+  if (!endpoint || !apiKey) { showToast('请先配置 API', 'error'); return; }
+
+  const btn = document.getElementById('btn-revise');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 修改中…';
+
+  try {
+    const currentTasks = (window._aiGeneratedTasks || []).map(t => ({
+      title: t.title, date: t.date, estimatedMinutes: t.estimatedMinutes
+    }));
+
+    const systemPrompt = `你是一个目标规划助手。用户对当前的任务拆解有修改建议，请根据建议重新生成任务清单。
+
+当前任务列表：
+${JSON.stringify(currentTasks, null, 2)}
+
+请根据用户建议修改后，严格用JSON格式返回新的任务清单（放在代码块中）。`;
+
+    const content = await callAI([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: feedback }
+    ]);
+
+    window._aiConversation.push({ role: 'user', content: '💡 修改建议：' + feedback });
+    window._aiConversation.push({ role: 'assistant', content: content });
+    renderAiConversation();
+
+    const tasks = parseTasksFromResponse(content);
+    if (tasks) {
+      window._aiGeneratedTasks = tasksToObjects(tasks);
+      renderAiTasks();
+      document.getElementById('ai-feedback-input').value = '';
+      showToast(`AI 已修改，共 ${tasks.length} 个任务`);
+    } else {
+      document.getElementById('ai-feedback-input').value = '';
+      showToast('AI 已回复，请查看对话记录');
+    }
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '🔄 提交建议给 AI 修改';
   }
 }
 
