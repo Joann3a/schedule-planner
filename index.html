@@ -458,6 +458,9 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="date" id="date-picker" onchange="jumpToDate()" style="width:140px;" />
+          <button class="btn btn-outline btn-sm" onclick="triggerImport()">📥 导入</button>
+          <button class="btn btn-outline btn-sm" onclick="exportICS()">📤 导出</button>
+          <input type="file" id="ics-file-input" accept=".ics" style="display:none;" onchange="handleICSFile(event)" />
           <div class="view-toggle" id="view-toggle">
             <button class="active" data-view="day" onclick="switchView('day')">日</button>
             <button data-view="week" onclick="switchView('week')">周</button>
@@ -542,6 +545,19 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeSettings()">取消</button>
       <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import Preview Modal -->
+<div class="modal-overlay" id="import-modal" onclick="if(event.target===this)closeImportModal()">
+  <div class="modal">
+    <h2>📥 导入日历事件</h2>
+    <p style="font-size:13px;color:var(--gray-500);margin-bottom:12px;">从 .ics 文件中解析到以下事件，确认后导入为任务。</p>
+    <div id="import-preview-list" style="max-height:300px;overflow-y:auto;margin-bottom:16px;"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeImportModal()">取消</button>
+      <button class="btn btn-primary" onclick="confirmImport()">确认导入</button>
     </div>
   </div>
 </div>
@@ -953,6 +969,171 @@ function toggleTaskComplete(taskId) {
     renderCalendar();
     refreshPomodoroTaskSelect();
   }
+}
+
+// ===========================
+// ICALENDAR IMPORT / EXPORT
+// ===========================
+let _importPreviewData = [];
+
+function triggerImport() {
+  document.getElementById('ics-file-input').click();
+}
+
+function handleICSFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = e.target.result;
+    const events = parseICS(text);
+    if (events.length === 0) {
+      showToast('文件中没有找到日历事件', 'error');
+      return;
+    }
+    // Check for duplicates
+    const newEvents = [];
+    for (const ev of events) {
+      const dup = appData.tasks.find(t =>
+        t.title === ev.title && t.date === ev.date
+      );
+      if (!dup) newEvents.push(ev);
+    }
+    if (newEvents.length === 0) {
+      showToast('所有事件已存在，没有新的可导入', 'error');
+      return;
+    }
+    _importPreviewData = newEvents;
+    showImportPreview(newEvents);
+  };
+  reader.readAsText(file);
+  event.target.value = '';
+}
+
+function parseICS(text) {
+  const events = [];
+  // Split into VEVENT blocks
+  const blocks = text.split(/BEGIN:VEVENT/i).slice(1);
+  for (const block of blocks) {
+    const endIdx = block.indexOf('END:VEVENT');
+    if (endIdx === -1) continue;
+    const content = block.slice(0, endIdx);
+
+    // Extract fields
+    const summary = content.match(/SUMMARY(?:;[^:]*)?:([^\r\n]+)/i);
+    const dtstart = content.match(/DTSTART(?:;[^:]*)?:(\d{8})T?(\d{0,6})?/i);
+    const dtend = content.match(/DTEND(?:;[^:]*)?:(\d{8})T?(\d{0,6})?/i);
+
+    if (!summary || !dtstart) continue;
+
+    const title = (summary[1] || '').replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\n/g, ' ').trim();
+    if (!title) continue;
+
+    const dateRaw = dtstart[1];
+    const y = dateRaw.slice(0, 4);
+    const m = dateRaw.slice(4, 6);
+    const d = dateRaw.slice(6, 8);
+    const date = `${y}-${m}-${d}`;
+
+    // Estimate duration from DTEND - DTSTART
+    let minutes = 60;
+    if (dtend) {
+      const startTime = dtstart[2] || '090000';
+      const endTime = dtend[2] || '100000';
+      const sh = parseInt(startTime.slice(0, 2) || '9');
+      const sm = parseInt(startTime.slice(2, 4) || '0');
+      const eh = parseInt(endTime.slice(0, 2) || '10');
+      const em = parseInt(endTime.slice(2, 4) || '0');
+      minutes = Math.max(15, (eh * 60 + em) - (sh * 60 + sm));
+    }
+
+    events.push({
+      id: genId(),
+      goalId: null,
+      title: title,
+      date: date,
+      completed: false,
+      estimatedMinutes: minutes
+    });
+  }
+  return events;
+}
+
+function showImportPreview(events) {
+  const list = document.getElementById('import-preview-list');
+  list.innerHTML = events.map((e, i) => `
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--gray-100);font-size:14px;">
+      <span style="color:var(--gray-400);flex-shrink:0;">${i + 1}</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:500;">${escHtml(e.title)}</div>
+        <div style="font-size:12px;color:var(--gray-500);">📅 ${e.date} · ⏱ ${e.estimatedMinutes}分钟</div>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('import-modal').classList.add('active');
+}
+
+function closeImportModal() {
+  document.getElementById('import-modal').classList.remove('active');
+  _importPreviewData = [];
+}
+
+function confirmImport() {
+  if (_importPreviewData.length === 0) return;
+  appData.tasks.push(..._importPreviewData);
+  saveData(appData);
+  closeImportModal();
+  renderCalendar();
+  refreshPomodoroTaskSelect();
+  showToast(`已导入 ${_importPreviewData.length} 个事件`);
+}
+
+function exportICS() {
+  if (appData.tasks.length === 0) {
+    showToast('没有可导出的任务', 'error');
+    return;
+  }
+
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//日程规划助手//CN',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH'
+  ];
+
+  for (const task of appData.tasks) {
+    // Convert date to DTSTART (default 9:00 am)
+    const d = task.date.replace(/-/g, '');
+    const hours = Math.floor((task.estimatedMinutes || 60) / 60);
+    const startH = Math.min(9 + hours, 22);
+    const dtstart = `${d}T${String(startH).padStart(2, '0')}0000`;
+    const endH = startH + Math.max(1, hours);
+    const dtend = `${d}T${String(Math.min(endH, 23)).padStart(2, '0')}0000`;
+
+    const summary = task.title.replace(/[,\\;]/g, '\\$&').replace(/\n/g, '\\n');
+
+    lines.push('BEGIN:VEVENT');
+    lines.push(`DTSTART:${dtstart}`);
+    lines.push(`DTEND:${dtend}`);
+    lines.push(`SUMMARY:${summary}`);
+    lines.push(`DESCRIPTION:日程规划助手任务${task.completed ? ' (已完成)' : ''}`);
+    lines.push(`STATUS:${task.completed ? 'CANCELLED' : 'CONFIRMED'}`);
+    lines.push('END:VEVENT');
+  }
+
+  lines.push('END:VCALENDAR');
+
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'schedule-planner.ics';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast(`已导出 ${appData.tasks.length} 个任务`);
 }
 
 // ===========================
